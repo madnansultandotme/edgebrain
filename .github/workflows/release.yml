@@ -1,0 +1,178 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: [3.11, 3.12]
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install -e .
+        pip install pytest pytest-cov pytest-asyncio
+
+    - name: Run tests
+      run: |
+        pytest tests/ -v --cov=src
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: 3.11
+
+    - name: Install build dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install build twine
+
+    - name: Build package
+      run: |
+        python -m build
+
+    - name: Check package
+      run: |
+        twine check dist/*
+
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: dist
+        path: dist/
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Download build artifacts
+      uses: actions/download-artifact@v3
+      with:
+        name: dist
+        path: dist/
+
+    - name: Extract version from tag
+      id: version
+      run: |
+        echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+    - name: Create Release
+      id: create_release
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ github.ref }}
+        release_name: Release ${{ steps.version.outputs.VERSION }}
+        body: |
+          ## Changes in this Release
+          
+          Please see [CHANGELOG.md](CHANGELOG.md) for detailed changes.
+          
+          ## Installation
+          
+          ```bash
+          pip install edgebrain==${{ steps.version.outputs.VERSION }}
+          ```
+          
+          ## Documentation
+          
+          - [Installation Guide](docs/installation.md)
+          - [Usage Guide](docs/usage_guide.md)
+          - [API Reference](docs/api_reference.md)
+          - [Architecture Documentation](docs/architecture.md)
+          
+          ## What's New
+          
+          - See CHANGELOG.md for complete list of changes
+          - Updated documentation and examples
+          - Bug fixes and performance improvements
+          
+        draft: false
+        prerelease: ${{ contains(steps.version.outputs.VERSION, 'alpha') || contains(steps.version.outputs.VERSION, 'beta') || contains(steps.version.outputs.VERSION, 'rc') }}
+
+    - name: Upload Release Assets
+      run: |
+        for file in dist/*; do
+          echo "Uploading $file"
+          curl \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Content-Type: application/octet-stream" \
+            --data-binary @"$file" \
+            "${{ steps.create_release.outputs.upload_url }}?name=$(basename $file)"
+        done
+
+  publish:
+    needs: release
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, 'alpha') && !contains(github.ref, 'beta') && !contains(github.ref, 'rc')
+    
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: 3.11
+
+    - name: Download build artifacts
+      uses: actions/download-artifact@v3
+      with:
+        name: dist
+        path: dist/
+
+    - name: Install publishing dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install twine
+
+    - name: Publish to PyPI
+      env:
+        TWINE_USERNAME: __token__
+        TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+      run: |
+        twine upload dist/*
+
+ 
+  notify:
+    needs: [release, publish]
+    runs-on: ubuntu-latest
+    if: always()
+    
+    steps:
+    - name: Notify on success
+      if: needs.release.result == 'success' && needs.publish.result == 'success'
+      run: |
+        echo "Release ${{ github.ref }} published successfully!"
+        # Add notification logic here (Slack, Discord, etc.)
+
+    - name: Notify on failure
+      if: needs.release.result == 'failure' || needs.publish.result == 'failure'
+      run: |
+        echo "Release ${{ github.ref }} failed!"
+        # Add notification logic here (Slack, Discord, etc.)
+
